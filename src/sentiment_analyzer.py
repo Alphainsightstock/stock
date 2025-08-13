@@ -1,130 +1,91 @@
 """
-News sentiment analysis using VADER sentiment analyzer
+Enhanced sentiment analysis module with text processing
 """
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import pandas as pd
 import numpy as np
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import re
 
 class SentimentAnalyzer:
     def __init__(self):
         self.analyzer = SentimentIntensityAnalyzer()
         
-        # Custom finance-specific lexicon additions
-        finance_lexicon = {
-            'profit': 2.0, 'loss': -2.0, 'gain': 1.5, 'drop': -1.5,
-            'bull': 2.0, 'bear': -2.0, 'rally': 1.8, 'crash': -2.5,
-            'upgrade': 1.8, 'downgrade': -1.8, 'buy': 1.5, 'sell': -1.5,
-            'growth': 1.5, 'decline': -1.5, 'surge': 2.0, 'plunge': -2.0,
-            'earnings': 1.0, 'dividend': 1.2, 'bankruptcy': -2.8,
-            'merger': 1.0, 'acquisition': 1.0, 'layoffs': -1.8
-        }
-        
-        # Update VADER lexicon with finance terms
-        self.analyzer.lexicon.update(finance_lexicon)
-
-    def get_sentiment_score(self, text):
-        """Get sentiment score for a single text"""
-        if pd.isna(text) or text.strip() == '':
-            return 0.0
-        
-        scores = self.analyzer.polarity_scores(text)
-        # Use compound score which ranges from -1 to 1
-        return scores['compound']
-
-    def get_detailed_sentiment(self, text):
-        """Get detailed sentiment breakdown"""
-        if pd.isna(text) or text.strip() == '':
-            return {'compound': 0.0, 'positive': 0.0, 'negative': 0.0, 'neutral': 1.0}
-        
-        return self.analyzer.polarity_scores(text)
-
-    def analyze_news_sentiment(self, news_df):
-        """Analyze sentiment for all news headlines"""
-        if news_df.empty:
-            return news_df
-        
-        news_df = news_df.copy()
-        
-        print("🧠 Analyzing news sentiment...")
-        
-        # Analyze headline sentiment
-        news_df['headline_sentiment'] = news_df['headline'].apply(self.get_sentiment_score)
-        
-        # Convert manual labels to numerical scores if available
-        if 'sentiment_label' in news_df.columns:
-            label_mapping = {'positive': 0.6, 'negative': -0.6, 'neutral': 0.0}
-            news_df['manual_sentiment'] = news_df['sentiment_label'].map(label_mapping).fillna(0.0)
-            
-            # Combine automated and manual sentiment (weighted average)
-            news_df['final_sentiment'] = (0.7 * news_df['headline_sentiment'] + 
-                                         0.3 * news_df['manual_sentiment'])
-        else:
-            news_df['final_sentiment'] = news_df['headline_sentiment']
-        
-        # Add sentiment confidence score
-        news_df['sentiment_confidence'] = news_df['headline_sentiment'].abs()
-        
-        # Classify sentiment
-        conditions = [
-            news_df['final_sentiment'] > 0.1,
-            news_df['final_sentiment'] < -0.1
+        self.positive_keywords = [
+            'growth', 'profit', 'revenue', 'expansion', 'partnership', 'approval', 
+            'launch', 'increase', 'strong', 'optimistic', 'recovery', 'win', 
+            'success', 'innovative', 'bullish', 'upgrade', 'breakthrough'
         ]
-        choices = ['Positive', 'Negative']
-        news_df['sentiment_category'] = np.select(conditions, choices, default='Neutral')
         
-        print(f"✅ Sentiment analysis complete!")
-        print(f"📊 Sentiment distribution:")
-        print(news_df['sentiment_category'].value_counts())
+        self.negative_keywords = [
+            'decline', 'loss', 'challenge', 'pressure', 'warning', 'issue',
+            'problem', 'struggle', 'concern', 'risk', 'fall', 'drop',
+            'bearish', 'downgrade', 'uncertainty', 'disruption'
+        ]
         
+    def clean_text(self, text):
+        if pd.isna(text):
+            return ""
+        text = str(text).lower()
+        text = re.sub(r'[^\w\s\-\.\%\$]', ' ', text)
+        text = ' '.join(text.split())
+        return text
+    
+    def calculate_keyword_sentiment(self, text):
+        cleaned_text = self.clean_text(text)
+        positive_count = sum(1 for word in self.positive_keywords if word in cleaned_text)
+        negative_count = sum(1 for word in self.negative_keywords if word in cleaned_text)
+        if positive_count == 0 and negative_count == 0:
+            return 0.0
+        total_words = len(cleaned_text.split())
+        positive_ratio = positive_count / max(total_words, 1)
+        negative_ratio = negative_count / max(total_words, 1)
+        return (positive_ratio - negative_ratio) * 2
+    
+    def get_sentiment_score(self, text):
+        cleaned_text = self.clean_text(text)
+        if not cleaned_text:
+            return 0.0
+        vader_scores = self.analyzer.polarity_scores(cleaned_text)
+        vader_compound = vader_scores['compound']
+        keyword_sentiment = self.calculate_keyword_sentiment(text)
+        final_score = 0.7 * vader_compound + 0.3 * keyword_sentiment
+        return max(-1.0, min(1.0, final_score))
+    
+    def analyze_news_sentiment(self, news_df):
+        news_df = news_df.copy()
+        news_df['headline_sentiment'] = news_df['headline'].apply(self.get_sentiment_score)
+        label_to_score = {'positive': 0.6, 'neutral': 0.0, 'negative': -0.6}
+        news_df['manual_sentiment'] = news_df['sentiment_label'].map(label_to_score).fillna(0.0)
+        news_df['final_sentiment'] = (0.8 * news_df['headline_sentiment'] + 0.2 * news_df['manual_sentiment'])
+        news_df['sentiment_confidence'] = 1 - abs(news_df['headline_sentiment'] - news_df['manual_sentiment'])
         return news_df
-
-    def aggregate_stock_sentiment(self, news_with_sentiment):
-        """Aggregate sentiment by stock and date"""
-        if news_with_sentiment.empty:
-            return pd.DataFrame()
-        
-        print("📊 Aggregating sentiment by stock and date...")
-        
-        # Group by stock ticker and date
-        aggregated = news_with_sentiment.groupby(['stock_ticker', 'date']).agg({
+    
+    def aggregate_stock_sentiment(self, news_df, window_days=1):
+        news_df['date'] = pd.to_datetime(news_df['date'])
+        grouped = news_df.groupby(['stock_ticker', 'date']).agg({
             'final_sentiment': ['mean', 'std', 'count'],
-            'sentiment_confidence': 'mean'
+            'sentiment_confidence': 'mean',
+            'headline': lambda x: ' | '.join(x)
         }).reset_index()
-        
-        # Flatten column names
-        aggregated.columns = ['stock_ticker', 'date', 'avg_sentiment', 'sentiment_std', 
-                             'article_count', 'avg_confidence']
-        
-        # Fill NaN standard deviations with 0
-        aggregated['sentiment_std'] = aggregated['sentiment_std'].fillna(0)
-        
-        # Calculate weighted sentiment (considering article count and confidence)
-        aggregated['weighted_sentiment'] = (
-            aggregated['avg_sentiment'] * 
-            np.log1p(aggregated['article_count']) * 
-            aggregated['avg_confidence']
-        )
-        
-        print(f"✅ Aggregated sentiment for {len(aggregated)} stock-date combinations")
-        
-        return aggregated
-
-    def get_latest_sentiment_summary(self, aggregated_sentiment):
-        """Get latest sentiment summary for dashboard"""
-        if aggregated_sentiment.empty:
-            return {}
-        
-        latest_date = aggregated_sentiment['date'].max()
-        latest_data = aggregated_sentiment[aggregated_sentiment['date'] == latest_date]
-        
-        return {
-            'date': latest_date,
-            'total_stocks': len(latest_data),
-            'avg_sentiment': latest_data['avg_sentiment'].mean(),
-            'positive_stocks': len(latest_data[latest_data['avg_sentiment'] > 0.1]),
-            'negative_stocks': len(latest_data[latest_data['avg_sentiment'] < -0.1]),
-            'neutral_stocks': len(latest_data[
-                (latest_data['avg_sentiment'] >= -0.1) & 
-                (latest_data['avg_sentiment'] <= 0.1)
-            ])
-        }
+        grouped.columns = [
+            'stock_ticker', 'date', 'avg_sentiment', 'sentiment_std', 
+            'article_count', 'avg_confidence', 'combined_headlines'
+        ]
+        grouped['sentiment_std'] = grouped['sentiment_std'].fillna(0)
+        grouped['weighted_sentiment'] = grouped['avg_sentiment'] * grouped['avg_confidence'] * np.log1p(grouped['article_count'])
+        return grouped
+    
+    def get_latest_sentiment_summary(self, aggregated_df):
+        latest_sentiment = aggregated_df.sort_values('date').groupby('stock_ticker').tail(1)
+        summary = []
+        for _, row in latest_sentiment.iterrows():
+            sentiment_label = 'Positive' if row['avg_sentiment'] > 0.1 else 'Negative' if row['avg_sentiment'] < -0.1 else 'Neutral'
+            summary.append({
+                'ticker': row['stock_ticker'],
+                'sentiment_score': round(row['avg_sentiment'], 3),
+                'sentiment_label': sentiment_label,
+                'confidence': round(row['avg_confidence'], 3),
+                'article_count': int(row['article_count']),
+                'latest_date': row['date'].strftime('%Y-%m-%d')
+            })
+        return pd.DataFrame(summary)
